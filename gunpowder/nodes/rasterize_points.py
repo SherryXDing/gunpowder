@@ -13,6 +13,7 @@ from gunpowder.ndarray import replace
 from gunpowder.points import PointsKeys
 from gunpowder.points_spec import PointsSpec
 from gunpowder.roi import Roi
+from gunpowder.batch_request import BatchRequest
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ class RasterizePoints(BatchFilter):
         self.enable_autoskip()
 
     def prepare(self, request):
-
+        
         if self.settings.mode == 'ball':
             context = np.ceil(self.settings.radius).astype(np.int)
         elif self.settings.mode == 'peak':
@@ -154,13 +155,11 @@ class RasterizePoints(BatchFilter):
 
         # request points in a larger area to get rasterization from outside
         # points
-        points_roi = request[self.array].roi.grow(
+        dependencies = copy.deepcopy(request)
+        points_roi = dependencies[self.array].roi.grow(
                 Coordinate(context),
                 Coordinate(context))
-
-        # however, restrict the request to the points actually provided
-        points_roi = points_roi.intersect(self.spec[self.points].roi)
-        request[self.points] = PointsSpec(roi=points_roi)
+        dependencies[self.points] = PointsSpec(roi=points_roi)
 
         if self.settings.mask is not None:
 
@@ -169,16 +168,19 @@ class RasterizePoints(BatchFilter):
                 "Voxel size of mask and rasterized volume need to be equal")
 
             new_mask_roi = points_roi.snap_to_grid(mask_voxel_size)
-            if self.settings.mask in request:
-                request[self.settings.mask].roi = \
-                    request[self.settings.mask].roi.union(new_mask_roi)
+            if self.settings.mask in dependencies:
+                dependencies[self.settings.mask].roi = \
+                    dependencies[self.settings.mask].roi.union(new_mask_roi)
             else:
-                request[self.settings.mask] = \
+                dependencies[self.settings.mask] = \
                     ArraySpec(roi=new_mask_roi)
 
-    def process(self, batch, request):
+        return dependencies
 
-        points = batch.points[self.points]
+    def process(self, batch_in, request):
+
+        batch_out = copy.deepcopy(batch_in)
+        points = batch_out.points[self.points]
         mask = self.settings.mask
         voxel_size = self.spec[self.array].voxel_size
 
@@ -201,7 +203,7 @@ class RasterizePoints(BatchFilter):
                                               dtype=self.spec[self.array].dtype)
         elif mask is not None:
 
-            mask_array = batch.arrays[mask].crop(enlarged_vol_roi)
+            mask_array = batch_out.arrays[mask].crop(enlarged_vol_roi)
             # get those component labels in the mask, that contain points
             labels = []
             for i, point in points.data.items():
@@ -262,7 +264,7 @@ class RasterizePoints(BatchFilter):
         rasterized_points = Array(
             data=rasterized_points_data,
             spec=spec)
-        batch.arrays[self.array] = rasterized_points.crop(request[self.array].roi)
+        batch_out.arrays[self.array] = rasterized_points.crop(request[self.array].roi)
 
         # restore requested ROI of points
         if self.points in request:
@@ -274,7 +276,9 @@ class RasterizePoints(BatchFilter):
 
         # restore requested mask
         if mask is not None:
-            batch.arrays[mask] = batch.arrays[mask].crop(request[mask].roi)
+            batch_out.arrays[mask] = batch_out.arrays[mask].crop(request[mask].roi)
+        
+        return batch_out
 
     def __rasterize(self, points, data_roi, voxel_size, dtype, settings, mask_array=None):
         '''Rasterize 'points' into an array with the given 'voxel_size'''
